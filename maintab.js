@@ -4,22 +4,22 @@
 // script+css nodes of DOM provided by content script are stored here
 var data = {};
 
+// maximum size of file to be beautified initially
+// rest is beautified when scrolled to bottom
+var MAX_SIZE = 20000;
+
+// is whole file currently displayed?
+var is_whole_file;
+
+// id of target tab
+var tabid;
+
 
 function init() {
 
-    // call content script: ask js+css nodes
-    if (window.chrome && chrome.tabs) {
-        var tabid = location.hash.slice(1);
-        tabid = parseInt(tabid);
+    tabid = parseInt(location.hash.slice(1));
 
-        // ask to return onclick handlers too?
-        var show_onclick = get_config("onclick");
-
-        chrome.tabs.sendMessage(tabid, {"showonclick":show_onclick}, data_received);
-    } else {
-        // while developing
-        data_received(debugdata);
-    }
+    ask_page_data();
 
     // view sources
     $("ol").on("click", "a", function(){
@@ -31,6 +31,7 @@ function init() {
         $("ol>li").removeClass("sel");
         li.addClass("sel");
 
+        is_whole_file = false;
         show_src(li);
         return false;
     });
@@ -44,6 +45,7 @@ function init() {
     // toggle beautify
     $("#beautify").click(function(){
         $(this).toggleClass("sel");
+        is_whole_file = false;
         show_src();
         return false;
     });
@@ -51,6 +53,10 @@ function init() {
 //        console.debug("d1", e.keyCode, e);
         if (e.keyCode == 66) {
             $("#beautify").trigger("click");
+        }
+        else if (e.keyCode == 78) {
+            $("body").toggleClass("nolinenum");
+            setTimeout(insert_line_numbers, 10);
         }
     });
 
@@ -64,20 +70,76 @@ function init() {
         $("#beautify").addClass("sel");
     }
 
+    if (get_config("linenum"))
+        $("body").removeClass("nolinenum");
+    else
+        $("body").addClass("nolinenum");
+
+    // scroll handler to beautify whole file
+    var w = $(window);
+    w.scroll(function() {
+        var top = w.scrollTop();
+        if (top > 0 && $("body").height() <= (w.height() + top)) {
+            // at bottom
+            show_src(null, true);
+        }
+    });
+    // anchor to beautify whole file
+    $("#src").on("click", "#viewwhole", function() {
+        show_src(null, true);
+        return false;
+    });
+
+    // copy to clipboard
+    $("#copy2clip").click(function(){
+        $("body").addClass("wait2");
+
+        setTimeout(function(){
+            var item = show_src(null, true);
+            if (item) {
+                var s = item.pretty || item.data || item.inline;
+                copy2clipboard(s);
+            }
+
+            $("body").removeClass("wait2");
+        }, 10);
+
+        return false;
+    });
+
 }
 
 // init phase2, after tree populated
 function init2() {
+
+    // for calculating line height
+    $("#src code").html("<span>&nbsp;</span>");
+
     setTimeout(function() {
+        line_height = $("#src code span").height();
+
         // show html node initially
         $("#htmllist li >a").eq(0).trigger("click");
     }, 10);
 }
 
+function ask_page_data() {
+    // call content script: ask js+css nodes
+    if (window.chrome && chrome.tabs) {
+        // ask to return onclick handlers too?
+        var show_onclick = get_config("onclick");
+
+        chrome.tabs.sendMessage(tabid, {"showonclick":show_onclick},
+                                data_received);
+    } else {
+        // while developing
+        data_received(debugdata);
+    }
+}
 
 // shows the source in given <li>
-function show_src(li) {
-    console.debug("show_src "+li);
+function show_src(li, show_whole_file) {
+//    console.debug("show_src " + li + show_whole_file);
 
     if (!li) {
         // find active li
@@ -93,82 +155,108 @@ function show_src(li) {
     if (index < 0)
         return;
 
-    // chrome fix: scroll to top first
-    window.scrollTo(0,0);
-
-    $("#src>code").text("");
-
     // js or css array?
     var arr;
     var ol = li.parent();
-    var cls = "";
+    var lang = "";
     if (ol.get(0).id == "jslist") {
         arr = data.js;
-        cls = "language-javascript";
+        lang = "javascript";
     } else if (ol.get(0).id == "htmllist") {
         arr = data.html;
-        cls = "language-html";
+        lang = "xml";
     } else {
         arr = data.css;
-        cls = "language-css";
+        lang = "css";
     }
 
-    // provide language hint for prettify
-    $("#src>code").removeClass("xml language-javascript language-html language-css javascript").addClass(cls);
+    $("#src>code").removeClass("language-javascript language-css language-xml").addClass("language-"+lang);
 
     var item = arr[index];
 
     if (item.src) {
         // external node
         if (item.data != undefined)
-            build_item(item, cls);
+            build_item(item, lang, show_whole_file);
         else
             load_data(item);
 
         $("#fname").text(item.src);
     } else {
         // inline node
-        build_item(item, cls);
+        build_item(item, lang, show_whole_file);
 
         $("#fname").text(item.count? data.url : item.onclick ? "ONCLICK" : "INLINE");
     }
 
+    if (!$("body").hasClass("nolinenum"))
+        setTimeout(insert_line_numbers, 10);
+
+    return item;
 }
 
 // shows the sources of a loaded node
-function build_item(item, lang) {
-    console.debug("build_item " + lang);
+function build_item(item, lang, show_whole_file) {
+    if (is_whole_file)
+        return;
 
+    console.debug("build_item " + lang + " whole=" + is_whole_file);
+
+    // large file, to show only first part?
     var s = item.data || item.inline;
+    if (!show_whole_file && s.length > MAX_SIZE) {
+        s = s.substr(0, MAX_SIZE);
+        is_whole_file = false;
+    } else {
+        is_whole_file = true;
+    }
+
+    var pos = $(window).scrollTop();
+
+    // called when source beautified
+    var onFinish = function(txt) {
+        $("#src>code").html(txt);
+
+        if (!is_whole_file) {
+            $("#src>code").append("\n\n<a id='viewwhole' href='#'>View all</a>");
+        }
+
+        // remember scroll pos
+        if (!show_whole_file) {
+            // chrome fix: scroll to top first
+            window.scrollTo(0, 0);
+        } else {
+            window.scrollTo(0, pos);
+        }
+    };
 
     // prettify?
     if ($("#beautify").hasClass("sel")) {
         s = s.trim();
 
-        if (lang == "language-css")
+        if (lang.indexOf("css") >= 0)
             s = css_beautify(s);
-        else if (lang == "language-html")
-            s = style_html(s);
+        else if (lang.indexOf("xml") >= 0)
+            s = html_beautify(s);
         else
             s = js_beautify(s);
     }
 
-    $("#src>code").text(s);
+    item.pretty = s;
 
     // colorize?
     if (get_config("colorize")) {
-        $("body").addClass("wait");
-
-        $("pre").hide(); // makes prettify faster
+        if (show_whole_file)
+            $("body").addClass("wait2");
 
         setTimeout(function(){
-//            prettyPrint();
-
-            hljs.highlightBlock($("pre>code").get(0));
-
-            $("body").removeClass("wait");
-            $("pre").show();
+            hljs.configure({classPrefix: ''});
+            var result = hljs.highlight(lang, s, true);
+            onFinish(hljs.fixMarkup(result.value));
+            $("body").removeClass("wait2");
         }, 10);
+    } else {
+        onFinish(s);
     }
 }
 
@@ -182,7 +270,9 @@ function update_li_text(item, header) {
         s = numberWithCommas(item.inline.length)+" bytes";
     }
 
-    if (item.dynamic)
+    if (item.imported)
+        s += " <span class='dynamic'>@IMPORT</span>";
+    else if (item.dynamic)
         s += " <span class='dynamic'>INJECTED</span>";
 
     if (item.count) {
@@ -223,6 +313,7 @@ function load_data(item) {
                 update_li_text(item, header);
             } else {
                 $("body").addClass("err");
+                $("#src>code").text("HTTP Error " + xhr.status);
             }
         }
     };
@@ -250,10 +341,25 @@ function pick_caching_header(xhr) {
 // js+css data received from content script
 function data_received(resp) {
     if (!resp) {
-        // target page didn't have our content script
-        $("body").addClass("err");
+        var err = chrome.extension.lastError;
 
-//        chrome.browserAction.setBadgeText({"text":"Err"});
+        // still loading page?
+        chrome.tabs.get(tabid, function(tab) {
+            if (tab.status == "complete" && err) {
+                // can't show this page
+                $("#src>code").text("Error: Access is denied to chrome:// and Chrome Store pages");
+                return;
+            }
+            // target page not yet loaded, ask again
+            $("#src>code").text("Page loading...");
+            setTimeout(ask_page_data, 500);
+        });
+        return;
+
+    } else if (resp.err) {
+        // some error occurred
+        $("body").addClass("err");
+        $("#src>code").text(resp.err);
         return;
     }
 
@@ -263,7 +369,9 @@ function data_received(resp) {
     // set badge for this source tab too
     update_badge(data);
 
-    $("title").text("SRC "+resp.url);
+    // set title
+    var url = remove_url_prefix(resp.url);
+    $("title").text("SRC "+url);
 
     var jscount = resp.js.length;
     var csscount = resp.css.length;
@@ -284,7 +392,9 @@ function data_received(resp) {
         item = resp.js[i];
 
         add_item($("#jslist"), item);
-        if (!item.src)
+        if (item.onclick)
+            onclickcount += 1;
+        else if (!item.src)
             jsinline += 1;
         update_li_text(item);
     }
@@ -317,7 +427,7 @@ function add_item(ol, item) {
     if (item.src)
         s = "<li><a href='"+item.src+"'>"+emphasize_name(item.src);
     else if (item.count)
-        s = "<li><a href='#'>"+data.url;
+        s = "<li><a href='#'>"+remove_url_prefix(data.url);
     else if (item.onclick)
         s = "<li><a href='#'>ONCLICK: <span></span>";
     else
@@ -341,6 +451,8 @@ function add_item(ol, item) {
 
 // emphasizes the file name part of the url
 function emphasize_name(url) {
+    url = remove_url_prefix(url);
+
     var len = url.length;
     var i = url.lastIndexOf("/");
     var s;
@@ -358,7 +470,55 @@ function numberWithCommas(x) {
     return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
-document.addEventListener('DOMContentLoaded', function() {
+window.addEventListener('load', function() {
     init();
 });
+
+// fills #src ol to have N items of <li>
+function insert_line_numbers() {
+    $("#src ol").empty();
+    var nums = [];
+    var count = calculate_line_count();
+
+    for (var i = 0; i < count; i++) {
+        nums.push("<li/>");
+    }
+    $("#src ol").html(nums.join(""));
+}
+
+var line_height = 0;
+
+function calculate_line_count() {
+    // can't count linefeeds since pre-wrap can also wrap lines
+//    var s = $("#src code").text();
+//    return s.split("\n").length;
+
+    // let's just calculate lines by box height
+    var h = $("#src code").height();
+
+    if (!line_height)
+        return 1;
+
+    return h/line_height - 1;
+}
+
+// removes "http://"
+function remove_url_prefix(url) {
+    if (url.startsWith("http://"))
+        url = url.substr(7);
+    else if (url.startsWith("https://"))
+        url = url.substr(8);
+    return url;
+}
+
+// copy text to clipboard
+function copy2clipboard(txt) {
+    var copyFrom = document.createElement("textarea");
+    copyFrom.textContent = txt;
+    var body = document.getElementsByTagName('body')[0];
+    body.appendChild(copyFrom);
+    copyFrom.select();
+    document.execCommand('copy');
+    body.removeChild(copyFrom);
+}
 
